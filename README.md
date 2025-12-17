@@ -1,5 +1,8 @@
 # udp_cfg_gui
 
+![alt text](image.png)
+
+
 一个基于 **PySide6（Qt for Python）** 的 Windows 上位机工具，用于通过 **UDP** 配置嵌入式设备上的视频流参数。
 
 该工具专门配合设备端的 `udp_cfgd` 守护进程使用，一次性配置视频流的四个关键参数：
