@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
 
         self.fps_spin = QSpinBox()
         self.fps_spin.setRange(1, 240)
-        self.fps_spin.setValue(30)
+        self.fps_spin.setValue(120)
 
         cfg_layout.addRow("width", self.width_spin)
         cfg_layout.addRow("height", self.height_spin)
@@ -192,7 +192,7 @@ class MainWindow(QMainWindow):
         self._append_log(f"!!! 错误: {msg}")
 
     def on_apply_clicked(self) -> None:
-        # 组装四元组 SET 命令：服务端支持 "SET 1280 720 8.0 30"
+        # 组装四元组 SET 命令：服务端支持 "SET 1280 720 8.0 120"
         w = int(self.width_spin.value())
         h = int(self.height_spin.value())
         b = float(self.bitrate_spin.value())
