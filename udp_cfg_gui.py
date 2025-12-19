@@ -13,8 +13,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QRect, QSize, QDateTime, QTimer
-from PySide6.QtGui import QImage, QIcon, QPainter, QPaintEvent, QColor
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QRect, QSize, QDateTime
+from PySide6.QtGui import QImage, QPainter, QPaintEvent, QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QFormLayout,
@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 # 0. 多语言配置
 # ==========================================
 LANG_TEXTS = {
-    "title": {"en": "IPC Tool v1.1.1", "zh": "IPC Tool v1.1.1"},
+    "title": {"en": "IPC Tool v1.2.0", "zh": "IPC Tool v1.2.0"},
     "grp_conn": {"en": "Device Target", "zh": "设备连接参数"},
     "lbl_ip": {"en": "IP Address", "zh": "IP 地址"},
     "lbl_port": {"en": "Command Port", "zh": "命令端口"},
@@ -108,10 +108,11 @@ def udp_exchange(host: str, port: int, payload: str, timeout_ms: int = 1200) -> 
 
 
 # ==========================================
-# 2. 视频解码线程 (关键修改)
+# 2. 视频解码线程 (仅计算 FPS)
 # ==========================================
 class VideoStreamWorker(QThread):
     frame_received = Signal(QImage)
+    stats_received = Signal(str)  # 用于发送 OSD 文本
     log_message = Signal(str)
 
     def __init__(self, url: str, parent=None):
@@ -125,26 +126,16 @@ class VideoStreamWorker(QThread):
         self.log_message.emit(f"[System] Worker({self.worker_id}) Connecting...")
 
         try:
-            # -------------------------------------------------------------
-            # [双重保险 2]：使用 OpenCV 4.x 新 API 直接传参
-            # 如果你的 OpenCV 版本较新，这个方法比环境变量更管用
-            # -------------------------------------------------------------
             try:
-                # 尝试构建参数 (Open Timeout 3000ms)
-                # 注意：并不是所有后端都支持这些属性，但加上去无害
                 params = [
                     cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000,
                     cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000
                 ]
                 self._cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG, params)
             except TypeError:
-                # 如果是旧版 OpenCV 不支持传参，回退到普通构造
                 self._cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
 
-            # -------------------------------------------------------------
-
             if not self.running:
-                # 刚连上就被叫停了
                 if self._cap.isOpened():
                     self._cap.release()
                 return
@@ -155,6 +146,10 @@ class VideoStreamWorker(QThread):
 
             self.log_message.emit(f"[System] Worker({self.worker_id}) Decoding...")
 
+            # --- 统计相关变量 ---
+            frame_counter = 0
+            last_time = time.time()
+
             while self.running:
                 ret, frame = self._cap.read()
 
@@ -162,12 +157,29 @@ class VideoStreamWorker(QThread):
                     break
 
                 if not ret:
-                    # 读取失败，可能是断流
                     self.log_message.emit(f"[Warn] Worker({self.worker_id}) EOF.")
                     break
 
+                # --- 1. 计算 FPS (每秒更新一次) ---
+                frame_counter += 1
+                curr_time = time.time()
+                elapsed = curr_time - last_time
+
+                # 每隔 1 秒更新一次统计数据
+                if elapsed >= 1.0:
+                    real_fps = frame_counter / elapsed
+                    h, w = frame.shape[:2]
+
+                    # 组装 OSD 文本：只保留分辨率和帧率
+                    stats_text = f"RES: {w}x{h} | FPS: {real_fps:.1f}"
+
+                    self.stats_received.emit(stats_text)
+
+                    last_time = curr_time
+                    frame_counter = 0
+                # ----------------------------------
+
                 try:
-                    # 只有当还在运行时才发送图像
                     if self.running:
                         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         h, w, ch = rgb_frame.shape
@@ -180,23 +192,22 @@ class VideoStreamWorker(QThread):
             if self.running:
                 self.log_message.emit(f"[Error] Worker({self.worker_id}) Err: {e}")
         finally:
-            # 即使这里卡住释放资源，也不会影响主界面
             if self._cap:
                 self._cap.release()
-            # 这行日志只在后台打印，证明线程彻底结束
-            # print(f"DEBUG: Real thread exit {self.worker_id}")
 
     def stop(self):
         self.running = False
 
 
 # ==========================================
-# 3. 渲染控件 (保持不变)
+# 3. 渲染控件 (OSD 绘制)
 # ==========================================
 class VideoCanvas(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_image: Optional[QImage] = None
+        self.osd_text: str = ""  # 存储统计信息
+
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet("background-color: #111;")
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
@@ -206,6 +217,11 @@ class VideoCanvas(QWidget):
     def set_frame(self, image: QImage):
         self.current_image = image
         self.update()
+
+    @Slot(str)
+    def set_stats(self, text: str):
+        """接收并更新统计信息"""
+        self.osd_text = text
 
     def set_placeholder_text(self, text: str):
         self.no_signal_text = text
@@ -221,12 +237,42 @@ class VideoCanvas(QWidget):
                 self.current_image.size(), self.size()
             )
             painter.drawImage(target_rect, self.current_image)
+
+            # === 绘制 OSD (左上角参数) ===
+            if self.osd_text:
+                self._draw_osd(painter, target_rect)
+            # ===========================
         else:
             painter.setPen(QColor(150, 150, 150))
             font = painter.font()
             font.setPointSize(16)
             painter.setFont(font)
             painter.drawText(self.rect(), Qt.AlignCenter, self.no_signal_text)
+
+    def _draw_osd(self, painter: QPainter, video_rect: QRect):
+        """在视频左上角绘制半透明背景和文字"""
+        text = self.osd_text
+        font = QFont("Consolas", 10, QFont.Bold)
+        painter.setFont(font)
+
+        fm = painter.fontMetrics()
+        text_w = fm.horizontalAdvance(text)
+        text_h = fm.height()
+
+        # OSD 位置：相对于视频画面的左上角，留一点边距
+        pad = 5
+        x = video_rect.x() + 10
+        y = video_rect.y() + 10
+
+        # 绘制半透明黑色背景框，增强对比度
+        bg_rect = QRect(x, y, text_w + 2 * pad, text_h + 2 * pad)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 160))  # 黑色，透明度 160/255
+        painter.drawRoundedRect(bg_rect, 4, 4)
+
+        # 绘制文字 (绿色)
+        painter.setPen(QColor(0, 255, 0))
+        painter.drawText(bg_rect, Qt.AlignCenter, text)
 
     def _calculate_aspect_ratio_rect(self, img_size: QSize, widget_size: QSize) -> QRect:
         if img_size.isEmpty() or widget_size.isEmpty():
@@ -246,11 +292,12 @@ class VideoCanvas(QWidget):
 
     def clear_screen(self):
         self.current_image = None
+        self.osd_text = ""
         self.update()
 
 
 # ==========================================
-# 4. 主窗口 (逻辑优化)
+# 4. 主窗口 (逻辑无变化)
 # ==========================================
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -442,12 +489,10 @@ class MainWindow(QMainWindow):
             url = self.rtsp_url_edit.text().strip()
             self.stream_btn.setText(LANG_TEXTS["btn_stop"][lang])
 
-            # 如果已有线程，遗弃它
             if self._video_worker:
                 self._abandon_worker(self._video_worker)
                 self._video_worker = None
 
-            # 启动新线程
             self._start_new_stream(url)
         else:
             # === 停止 ===
@@ -457,42 +502,26 @@ class MainWindow(QMainWindow):
                 self._abandon_worker(self._video_worker)
                 self._video_worker = None
 
-            # 清屏
             self.video_canvas.clear_screen()
 
     def _start_new_stream(self, url):
         self._video_worker = VideoStreamWorker(url, parent=self)
         self._video_worker.frame_received.connect(self.video_canvas.set_frame)
+        self._video_worker.stats_received.connect(self.video_canvas.set_stats)  # 连接统计信号
         self._video_worker.log_message.connect(self._append_log)
-        # 线程结束时自动清理内存
         self._video_worker.finished.connect(self._video_worker.deleteLater)
         self._video_worker.start()
 
     def _abandon_worker(self, worker: VideoStreamWorker):
-        """
-        遗弃线程：UI 层面立刻断开联系。
-        注意：这并不意味着底层 TCP 连接立刻断开，但 UI 不会再被卡住了。
-        """
         if not worker:
             return
-
         self._append_log(f"[System] UI disconnected from Worker({worker.worker_id}).")
-
-        # 1. 标记停止
         worker.stop()
-
-        # 2. 安全断开画面信号，防止 'Failed to disconnect' 报错
         try:
             worker.frame_received.disconnect()
-        except RuntimeError:
-            pass
+            worker.stats_received.disconnect()  # 断开统计信号
         except Exception:
             pass
-
-        # 3. 日志信号我们保留不断开，这样当那个"僵尸"线程真的超时结束时，
-        # 我们还能在日志里看到它销毁的消息（虽然可能会晚30秒）
-
-        # 4. 绝对不要调用 wait()，否则会卡死主线程
 
     def closeEvent(self, event):
         if self._video_worker:
