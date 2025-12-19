@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 # 0. 多语言配置
 # ==========================================
 LANG_TEXTS = {
-    "title": {"en": "IPC Tool v1.7.0 (Instant Stop)", "zh": "IPC Tool v1.7.0 (秒断流版)"},
+    "title": {"en": "IPC Tool v1.1.1", "zh": "IPC Tool v1.1.1"},
     "grp_conn": {"en": "Device Target", "zh": "设备连接参数"},
     "lbl_ip": {"en": "IP Address", "zh": "IP 地址"},
     "lbl_port": {"en": "Command Port", "zh": "命令端口"},
